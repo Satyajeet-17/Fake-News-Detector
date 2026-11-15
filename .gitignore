@@ -22,3 +22,19 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Environment Variables (API Keys)
+.env
+
+# Python Virtual Environments & Cache
+venv/
+__pycache__/
+*.py[cod]
+
+# Machine Learning Model Artifacts
+models/
+*.pkl
+
+# Large Datasets
+*.csv
+*.xls
