@@ -17,12 +17,40 @@ llm = ChatGoogleGenerativeAI(
 
 
 tavily = TavilySearch(
-    max_results=8,
+    max_results=5,
     topic="news",
     search_depth="advanced",
     include_answer=False,
-    include_raw_content=True
+    include_raw_content=False
 )
+
+
+class SourceAnalysis(BaseModel):
+
+    website_name: str
+
+    article_title: str
+
+    article_url: str
+
+    source_category: Literal[
+        "GOVERNMENT",
+        "ESTABLISHED_NEWS",
+        "FACT_CHECKER",
+        "UNKNOWN"
+    ]
+
+    evidence_type: Literal[
+        "SUPPORTS",
+        "CONTRADICTS",
+        "MENTIONS_ONLY",
+        "IRRELEVANT"
+    ]
+
+    evidence: str = Field(
+        description="Specific evidence from the article"
+    )
+
 
 class NewsVerification(BaseModel):
 
@@ -30,31 +58,18 @@ class NewsVerification(BaseModel):
         "SOURCE_FOUND",
         "NO_SOURCE_FOUND",
         "LIKELY_FAKE"
-    ] = Field(
-        description="Final verification result"
-    )
+    ]
 
-    explanation: str = Field(
-        description="Reason behind the verdict"
-    )
+    explanation: str
 
-    matching_sources: list[str] = Field(
-        description="Websites that reported or support the news"
-    )
-
-    source_urls: list[str] = Field(
-        description="URLs of matching articles"
-    )
-
-    contradictory_sources: list[str] = Field(
-        description="Websites providing evidence against the news"
-    )
+    sources: list[SourceAnalysis]
 
     confidence: Literal[
         "LOW",
         "MEDIUM",
         "HIGH"
     ]
+
 
 structured_llm = llm.with_structured_output(
     NewsVerification
@@ -84,14 +99,16 @@ def verify_news(title, body):
     official government sources.
     """
 
-    # Search internet using Tavily
-    search_results = tavily.invoke(
-        {"query": search_query}
-    )
+    # Generate multiple search queries
+    queries = generate_search_queries(title, body)
 
-    results = search_results.get("results", [])
+    # Execute all searches
+    results = search_multiple_queries(queries)
 
-    print(f"\nFound {len(results)} search results.")
+    # Remove duplicate articles
+    results = remove_duplicate_results(results)
+
+    print(f"\nTotal unique results: {len(results)}")
 
     # If no results are found
     if not results:
@@ -111,13 +128,14 @@ def verify_news(title, body):
     # Prepare search results for Gemini
     formatted_results = []
 
+    selected_results = results[:8]
+
     for result in results:
 
         formatted_results.append({
             "title": result.get("title"),
             "url": result.get("url"),
             "content": result.get("content"),
-            "raw_content": result.get("raw_content")
         })
 
     search_context = json.dumps(
@@ -126,76 +144,170 @@ def verify_news(title, body):
         ensure_ascii=False
     )
 
+    print("\n========== SEARCH STATISTICS ==========")
+
+    print("Total Tavily results:", len(results))
+
+    print("Results sent to Gemini:", len(formatted_results))
+
+    print(
+        "Approximate input characters:",
+        len(prompt) if 'prompt' in locals() else len(search_context)
+    )
+
+    print("=======================================")
+
+    print(
+    "\nSearch context characters:",
+    len(search_context)
+    )
+
     prompt = f"""
 
-    You are an expert news verification assistant.
+      You are an expert news verification assistant.
 
-    Your task is to verify the submitted news
-    using the provided internet search results.
+      Your task is to investigate the submitted news
+      using the provided internet search results.
 
-    NEWS TITLE:
-    {title}
+      NEWS TITLE:
+      {title}
 
-    NEWS BODY:
-    {body}
+      NEWS BODY:
+      {body}
+
+      INTERNET SEARCH RESULTS:
+      {search_context}
 
 
-    INTERNET SEARCH RESULTS:
-    {search_context}
+      INSTRUCTIONS:
 
+      For EVERY relevant search result:
 
-    VERIFICATION INSTRUCTIONS:
+      1. Identify the website name.
+      2. Extract the article title.
+      3. Extract its URL.
+      4. Classify the website.
+      5. Determine whether the article supports,
+         contradicts, or merely mentions the claim.
+      6. Extract the relevant evidence.
 
-    1. Examine the submitted title and body.
+      SOURCE CATEGORIES:
 
-    2. Compare their factual claims with the
-       information in the search results.
+      GOVERNMENT:
+      Official government websites and government agencies.
 
-    3. Look for websites reporting the same event.
+      ESTABLISHED_NEWS:
+      Recognized news organizations such as Reuters,
+      BBC, AP, CNN and similar publishers.
 
-    4. Check whether the sources actually support
-       the specific claims in the submitted news.
+      FACT_CHECKER:
+      Organizations specializing in fact-checking.
 
-    5. Identify reliable sources that contradict
-       the submitted claims.
+      UNKNOWN:
+      Websites whose credibility cannot be established
+      from the available information.
 
-    6. Do not assume a news article is authentic
-       simply because its title looks similar.
+      EVIDENCE TYPES:
 
-    7. Do not treat search engine snippets as
-       conclusive evidence.
+      SUPPORTS:
+      Provides evidence supporting the news.
 
-    8. Do not invent website names or URLs.
+      CONTRADICTS:
+      Provides evidence against the news.
 
-    VERDICT RULES:
+      MENTIONS_ONLY:
+      Mentions the topic without establishing
+      whether the claim is true or false.
 
-    SOURCE_FOUND:
-    At least one identifiable source provides
-    meaningful evidence supporting the news.
+      IRRELEVANT:
+      Does not provide useful evidence.
 
-    NO_SOURCE_FOUND:
-    No relevant supporting source was found,
-    or the available evidence is insufficient.
+      IMPORTANT RULES:
 
-    LIKELY_FAKE:
-    Reliable evidence directly contradicts
-    important factual claims in the submitted news.
+      - Never invent websites or URLs.
+      - Use only URLs from the search results.
+      - Do not assume a source is credible simply
+        because it appears in search results.
+      - Do not classify a source based only on its domain
+        if the publisher cannot be identified.
+      - Do not confuse mentioning a claim with confirming it.
+      - Do not assume that absence of evidence means fake news.
+      - Consider publication dates.
+      - Distinguish between partial and complete confirmation.
 
-    IMPORTANT:
-    - Absence of evidence is not evidence of falsity.
-    - A matching headline alone is insufficient.
-    - Consider publication dates.
-    - Distinguish partial confirmation from full confirmation.
-    - Only return URLs present in the search results.
-    - Be conservative when assigning confidence.
+      VERDICT:
 
-    Return the structured verification result.
+      SOURCE_FOUND:
+      At least one source provides meaningful supporting evidence.
 
-    """
+      NO_SOURCE_FOUND:
+      No meaningful supporting evidence was identified.
+
+      LIKELY_FAKE:
+      Reliable evidence directly contradicts important claims.
+
+      Return structured output.
+      """
 
     response = structured_llm.invoke(prompt)
 
     return response
+
+
+def generate_search_queries(title, body):
+
+    queries = [
+
+        # Search 1: Exact headline
+        f'"{title}"',
+
+        # Search 2: News coverage
+        f'{title} news reports latest developments',
+
+        # Search 3: Official confirmation
+        f'{title} official government announcement legislation',
+
+        # Search 4: Fact checking
+        f'{title} fact check fake or misleading'
+
+    ]
+
+    return queries
+
+def search_multiple_queries(queries):
+
+    all_results = []
+
+    for index, query in enumerate(queries, start=1):
+
+        print(f"\nExecuting search {index}/{len(queries)}")
+        print("Query:", query)
+
+        results = tavily.invoke({
+            "query": query
+        })
+
+        search_results = results.get("results", [])
+
+        all_results.extend(search_results)
+
+    return all_results
+
+def remove_duplicate_results(results):
+
+    unique_results = {}
+
+    for result in results:
+
+        url = result.get("url")
+
+        if url and url not in unique_results:
+
+            unique_results[url] = result
+
+    return list(unique_results.values())
+
+
 
 
 
@@ -212,26 +324,30 @@ if __name__ == "__main__":
     print("\n========== NEWS VERIFICATION ==========")
 
     print("\nVerdict:", result.verdict)
-
+    
     print("\nExplanation:")
     print(result.explanation)
-
-    print("\nMatching Sources:")
-
-    for source in result.matching_sources:
-        print("-", source)
-
-    print("\nSource URLs:")
-
-    for url in result.source_urls:
-        print("-", url)
-
-    print("\nContradictory Sources:")
-
-    for source in result.contradictory_sources:
-        print("-", source)
-
-    print("\nConfidence:", result.confidence)
-
-    print("\n=======================================")
     
+    print("\nSOURCE ANALYSIS")
+    
+    for source in result.sources:
+    
+        print("\n------------------------------")
+    
+        print("Website:", source.website_name)
+    
+        print("Article:", source.article_title)
+    
+        print("URL:", source.article_url)
+    
+        print("Category:", source.source_category)
+    
+        print("Evidence Type:", source.evidence_type)
+    
+        print("Evidence:", source.evidence)
+    
+        print("------------------------------")
+
+print("\nConfidence:", result.confidence)
+
+print("\n=======================================")
